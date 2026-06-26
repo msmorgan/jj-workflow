@@ -321,14 +321,21 @@ scripts/conflicts accept FILE diff             # accept %%% (diff-applied) side
 scripts/conflicts accept FILE base             # accept the merge base
 scripts/conflicts accept FILE stack            # stack both adds: diff first, then snapshot
 scripts/conflicts accept FILE stack-snap-first # stack both adds: snapshot first
+scripts/conflicts accept FILE sort             # merge alphabetized-list adds, re-sorted
+scripts/conflicts auto [--dry-run] [FILE ...]  # auto-merge alphabetized-list conflicts
 ```
 
 `show --json` includes a `stackable: true` field on hunks where both sides are pure
 additions (no deletions) — useful for scripted resolution.
 
-> **Phase B:** An `auto` subcommand is planned. It will detect pure-additive conflicts
-> in alphabetically-sorted list files and resolve them automatically, without manual
-> marker removal.
+The `auto` subcommand resolves the most common conflict class automatically: when both
+branches added lines to an already-sorted list (imports, dependency lists) and the region
+is a sorted run of at least 3 lines, it merges both sides' additions and re-sorts — no
+manual marker removal. It acts only when confident (both sides pure additions, base run
+already sorted); any hunk that does not qualify is reported and left untouched, and `auto`
+exits 0 even with hunks left, so it composes into `workflow repair`. Use `--dry-run` to
+preview decisions without writing. `accept FILE sort` applies the same merge to one file
+on demand.
 
 ---
 

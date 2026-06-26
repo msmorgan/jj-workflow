@@ -350,9 +350,7 @@ def _auto_resolve_file(path, filepath, dry):
                 path.write_text("".join(new_lines))
                 progressed = True
                 break  # re-parse the rewritten file
-        if dry and not progressed:
-            break
-        if not dry and not progressed:
+        if not progressed:
             break
     return resolved, left
 

@@ -284,10 +284,10 @@ def cmd_show(args):
 
 def cmd_accept(args):
     if len(args) < 2:
-        print("Usage: scripts/conflicts accept FILE snapshot|diff|base|stack[,stack-snap-first]", file=sys.stderr)
+        print("Usage: scripts/conflicts accept FILE snapshot|diff|base|stack|stack-snap-first|sort", file=sys.stderr)
         sys.exit(1)
     filepath, side = args[0], args[1]
-    valid = ("snapshot", "diff", "base", "stack", "stack-snap-first")
+    valid = ("snapshot", "diff", "base", "stack", "stack-snap-first", "sort")
     if side not in valid:
         print(f"Unknown side '{side}'. Choose: {', '.join(valid)}", file=sys.stderr)
         sys.exit(1)
@@ -295,6 +295,10 @@ def cmd_accept(args):
     if path is None:
         print(f"Not found: {filepath}", file=sys.stderr)
         sys.exit(1)
+    if side == "sort":
+        resolved, left = _auto_resolve_file(path, filepath, dry=False)
+        print(f"  ---\n  resolved {resolved} hunk(s), {left} left for review")
+        return
     hunks, lines = parse_file(path)
     if not hunks:
         print(f"No conflicts in {filepath}")
@@ -390,6 +394,7 @@ _USAGE = """Usage: scripts/conflicts <command> [args]
   accept FILE base              Accept merge base for all hunks in FILE
   accept FILE stack             Stack both adds: diff-side first, then snapshot
   accept FILE stack-snap-first  Stack both adds: snapshot first, then diff-side
+  accept FILE sort              Merge alphabetized-list adds in FILE (same engine as `auto`)
   auto [--dry-run] [FILE ...]   Auto-merge alphabetized-list conflicts (both sides
                                 pure adds into a sorted run of >=3 lines). Reports
                                 and leaves anything that doesn't qualify.

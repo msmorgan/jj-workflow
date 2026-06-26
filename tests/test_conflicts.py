@@ -245,3 +245,11 @@ def test_auto_leaves_non_qualifying(tmp_path):
     assert f.read_text() == REMOVAL  # left untouched
     assert "left (removal present)" in r.stdout
     assert "resolved 0" in r.stdout
+
+
+def test_accept_sort_one_file(tmp_path):
+    f = tmp_path / "imports.txt"
+    f.write_text(QUALIFYING)
+    r = _run("accept", str(f), "sort")
+    assert r.returncode == 0, r.stderr
+    assert f.read_text() == EXPECTED

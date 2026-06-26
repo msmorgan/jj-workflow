@@ -253,3 +253,55 @@ def test_accept_sort_one_file(tmp_path):
     r = _run("accept", str(f), "sort")
     assert r.returncode == 0, r.stderr
     assert f.read_text() == EXPECTED
+
+
+# A blank line below the conflict must bound the run: the add stays in the upper
+# group and the blank-separated lower group is untouched.
+BLANK_GROUP = """\
+import aaa
+<<<<<<< conflict 1 of 1
+%%%%%%%
+ import bbb
++import bcc
+ import ddd
++++++++
+import bbb
+import ccc
+import ddd
+>>>>>>> conflict 1 of 1
+
+import zzz
+"""
+
+BLANK_GROUP_EXPECTED = """\
+import aaa
+import bbb
+import bcc
+import ccc
+import ddd
+
+import zzz
+"""
+
+
+def test_auto_respects_blank_group_boundary(tmp_path):
+    f = tmp_path / "g.txt"
+    f.write_text(BLANK_GROUP)
+    r = _run("auto", str(f))
+    assert r.returncode == 0, r.stderr
+    assert f.read_text() == BLANK_GROUP_EXPECTED
+
+
+def test_auto_mixed_file_resolves_one_leaves_other(tmp_path):
+    # Concatenate a qualifying block and a removal (non-qualifying) block.
+    f = tmp_path / "m.txt"
+    f.write_text(QUALIFYING + REMOVAL)
+    r = _run("auto", str(f))
+    assert r.returncode == 0, r.stderr
+    txt = f.read_text()
+    # qualifying hunk resolved...
+    assert "import bcc\nimport ccc" in txt
+    # ...removal hunk still has its markers
+    assert "<<<<<<< conflict" in txt
+    assert "resolved 1" in r.stdout
+    assert "left (removal present)" in r.stdout

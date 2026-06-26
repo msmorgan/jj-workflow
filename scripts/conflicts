@@ -25,6 +25,7 @@ import json
 import re
 import subprocess
 import sys
+from collections import Counter
 from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -64,8 +65,12 @@ def parse_file(path):
             while j < len(lines) and not lines[j].startswith(end_pfx + " conflict"):
                 j += 1
             sides = _parse_sides(lines[i + 1:j], n)
+            try:
+                file_str = str(path.relative_to(PROJECT_ROOT))
+            except ValueError:
+                file_str = str(path)
             hunks.append({
-                "file": str(path.relative_to(PROJECT_ROOT)),
+                "file": file_str,
                 "hunk": int(m.group(2)),
                 "total": int(m.group(3)),
                 "start_line": i + 1,   # 1-indexed
@@ -132,7 +137,84 @@ def _parse_sides(inner, n):
         and result["diff_side"] != result["diff_base"]  # diff-side actually added something
         and result["snapshot"] != []
     )
+    result["has_removal"] = has_removal
     return result
+
+
+def _multiset_diff(super_lines, sub_lines):
+    """Lines in super_lines not accounted for by sub_lines (multiset difference)."""
+    remaining = Counter(sub_lines)
+    extra = []
+    for line in super_lines:
+        if remaining.get(line, 0) > 0:
+            remaining[line] -= 1
+        else:
+            extra.append(line)
+    return extra
+
+
+def _is_sorted(seq):
+    return all(seq[i] <= seq[i + 1] for i in range(len(seq) - 1))
+
+
+def _sorted_merge_resolution(hunk, lines):
+    """
+    Resolve `hunk` iff it is two pure-add edits into an already-sorted run of >=3
+    lines. Return (new_file_lines, n_adds) on success, else (None, reason).
+    """
+    # 1. Both sides must be pure adds.
+    if hunk.get("has_removal"):
+        return None, "removal present"
+    # No-newline-at-EOF (continuation '\' markers) — decline, keep it simple.
+    if any(l.startswith("\\") for l in hunk["raw"]):
+        return None, "no-newline at EOF"
+
+    base = hunk["diff_base"]
+    if not _is_sorted(base):
+        return None, "base region not sorted"
+
+    x_adds = _multiset_diff(hunk["diff_side"], base)
+    y_adds = _multiset_diff(hunk["snapshot"], base)
+    adds = x_adds + y_adds
+    if not adds:
+        return None, "no additions"
+
+    # 2. Virtual base file: this hunk's markers replaced by its base lines; any
+    #    other hunk's markers remain as ordinary boundary lines.
+    before = lines[:hunk["_start"]]
+    after = lines[hunk["_end"] + 1:]
+    virtual = before + base + after
+    p = len(before)
+    q = p + len(base)
+
+    # 3. Maximal non-decreasing run covering the base region.
+    if p == q:  # empty base region: run must straddle the junction at p
+        if p == 0 or p >= len(virtual) or virtual[p - 1] > virtual[p]:
+            return None, "no sorted run at insertion point"
+        lo, hi = p - 1, p + 1
+    else:
+        lo, hi = p, q
+    while lo > 0 and virtual[lo - 1] <= virtual[lo]:
+        lo -= 1
+    while hi < len(virtual) and virtual[hi - 1] <= virtual[hi]:
+        hi += 1
+
+    run = virtual[lo:hi]
+    if len(run) < 3:
+        return None, f"sorted run too short ({len(run)} < 3)"
+
+    # 4. Merge run + new adds (dedup new lines only), re-sort. Existing run lines
+    #    are preserved as-is; an add equal to an existing/other-side line is kept once.
+    merged = list(run)
+    seen = set(run)
+    for a in adds:
+        if a not in seen:
+            merged.append(a)
+            seen.add(a)
+    merged.sort()
+
+    new_virtual = virtual[:lo] + merged + virtual[hi:]
+    return new_virtual, len(merged) - len(run)
 
 
 # ---------------------------------------------------------------------------

@@ -1,0 +1,211 @@
+import importlib.machinery
+import importlib.util
+import subprocess
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+CONFLICTS = ROOT / "scripts" / "conflicts"
+
+# Load the extension-less script as a module for unit tests.
+_loader = importlib.machinery.SourceFileLoader("conflicts_mod", str(CONFLICTS))
+_spec = importlib.util.spec_from_loader("conflicts_mod", _loader)
+conflicts = importlib.util.module_from_spec(_spec)
+_loader.exec_module(conflicts)
+
+
+# A qualifying conflict: branch X adds `import bcc`, branch Y adds `import ccc`,
+# into a sorted block with `import aaa` above and `import eee` below.
+QUALIFYING = """\
+import aaa
+<<<<<<< conflict 1 of 1
+%%%%%%%
+ import bbb
++import bcc
+ import ddd
++++++++
+import bbb
+import ccc
+import ddd
+>>>>>>> conflict 1 of 1
+import eee
+"""
+
+EXPECTED = """\
+import aaa
+import bbb
+import bcc
+import ccc
+import ddd
+import eee
+"""
+
+
+def _hunk(tmp_path, text):
+    f = tmp_path / "f.txt"
+    f.write_text(text)
+    hunks, lines = conflicts.parse_file(f)
+    return hunks[0], lines
+
+
+def test_sorted_merge_qualifies(tmp_path):
+    hunk, lines = _hunk(tmp_path, QUALIFYING)
+    new_lines, n_adds = conflicts._sorted_merge_resolution(hunk, lines)
+    assert new_lines is not None
+    assert "".join(new_lines) == EXPECTED
+    assert n_adds == 2
+
+
+REMOVAL = """\
+import aaa
+<<<<<<< conflict 1 of 1
+%%%%%%%
+ import bbb
+-import ddd
++import bcc
++++++++
+import bbb
+import ccc
+import ddd
+>>>>>>> conflict 1 of 1
+import eee
+"""
+
+UNSORTED_BASE = """\
+zzz
+<<<<<<< conflict 1 of 1
+%%%%%%%
+ ddd
++ccc
+ bbb
++++++++
+ddd
+aaa
+bbb
+>>>>>>> conflict 1 of 1
+"""
+
+TOO_SHORT = """\
+<<<<<<< conflict 1 of 1
+%%%%%%%
+ bbb
++bcc
++++++++
+bbb
+ccc
+>>>>>>> conflict 1 of 1
+"""
+
+
+def test_declines_on_removal(tmp_path):
+    hunk, lines = _hunk(tmp_path, REMOVAL)
+    new_lines, reason = conflicts._sorted_merge_resolution(hunk, lines)
+    assert new_lines is None
+    assert reason == "removal present"
+
+
+def test_declines_on_unsorted_base(tmp_path):
+    hunk, lines = _hunk(tmp_path, UNSORTED_BASE)
+    new_lines, reason = conflicts._sorted_merge_resolution(hunk, lines)
+    assert new_lines is None
+    assert reason == "base region not sorted"
+
+
+def test_declines_on_short_run(tmp_path):
+    hunk, lines = _hunk(tmp_path, TOO_SHORT)
+    new_lines, reason = conflicts._sorted_merge_resolution(hunk, lines)
+    assert new_lines is None
+    assert reason.startswith("sorted run too short")
+
+
+BLANK_APPEND = """import aaa
+<<<<<<< conflict 1 of 1
+%%%%%%%
+ import bbb
++import eee
+ import ccc
++++++++
+import bbb
+import ddd
+import ccc
+>>>>>>> conflict 1 of 1
+
+import zzz_separate_group
+"""
+
+BLANK_APPEND_EXPECTED = """import aaa
+import bbb
+import ccc
+import ddd
+import eee
+
+import zzz_separate_group
+"""
+
+
+def test_sorted_merge_appends_past_block_before_blank(tmp_path):
+    hunk, lines = _hunk(tmp_path, BLANK_APPEND)
+    new_lines, n_adds = conflicts._sorted_merge_resolution(hunk, lines)
+    assert new_lines is not None            # must NOT decline: blank line is a normal group boundary
+    assert "".join(new_lines) == BLANK_APPEND_EXPECTED
+    assert n_adds == 2
+
+
+SAME_ADD = """import aaa
+<<<<<<< conflict 1 of 1
+%%%%%%%
+ import bbb
++import new
+ import ddd
++++++++
+import bbb
+import new
+import ddd
+>>>>>>> conflict 1 of 1
+import eee
+"""
+
+SAME_ADD_EXPECTED = """import aaa
+import bbb
+import ddd
+import eee
+import new
+"""
+
+
+def test_sorted_merge_dedups_identical_add(tmp_path):
+    hunk, lines = _hunk(tmp_path, SAME_ADD)
+    new_lines, n_adds = conflicts._sorted_merge_resolution(hunk, lines)
+    assert "".join(new_lines) == SAME_ADD_EXPECTED
+    assert n_adds == 1
+
+
+PREPEND = """zzz non-import line
+<<<<<<< conflict 1 of 1
+%%%%%%%
+ import bbb
++import aaa
+ import ddd
++++++++
+import bbb
+import aab
+import ddd
+>>>>>>> conflict 1 of 1
+import eee
+"""
+
+PREPEND_EXPECTED = """zzz non-import line
+import aaa
+import aab
+import bbb
+import ddd
+import eee
+"""
+
+
+def test_sorted_merge_prepends_before_run_start(tmp_path):
+    hunk, lines = _hunk(tmp_path, PREPEND)
+    new_lines, n_adds = conflicts._sorted_merge_resolution(hunk, lines)
+    assert new_lines is not None
+    assert "".join(new_lines) == PREPEND_EXPECTED
+    assert n_adds == 2

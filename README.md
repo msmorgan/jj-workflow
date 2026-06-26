@@ -1,0 +1,391 @@
+# jj-workflow
+
+A toolkit for multi-workspace [Jujutsu (jj)](https://github.com/jj-vcs/jj) development.
+It enforces trunk immutability, routes all jj calls through a workspace-pinned wrapper,
+and manages a claim→integrate feature lifecycle where each in-flight feature lives in
+its own isolated workspace.
+
+---
+
+## Table of contents
+
+1. [Installation](#installation)
+2. [Repository shape](#repository-shape)
+3. [The `scripts/jj` wrapper](#the-scriptsjj-wrapper)
+4. [The `jj_guard` hook (AI-agent enforcement)](#the-jj_guard-hook)
+5. [Feature workflow](#feature-workflow)
+   - [Claim / start](#claiming-and-starting-features)
+   - [Integrate](#integrating-a-feature)
+   - [Abandon](#abandoning-a-feature)
+   - [Refresh](#refreshing-keeping-current-with-trunk)
+6. [Ticket folders as status](#ticket-folders-as-status)
+7. [Recovery (repair / converge / resolve)](#recovery)
+8. [Conflicts tool](#conflicts-tool)
+9. [Configuration](#configuration)
+10. [Appendix: Example provision-workspace hook](#appendix-example-provision-workspace-hook)
+
+---
+
+## Installation
+
+```bash
+# Symlink mode — updates to jj-workflow propagate to your repo automatically.
+./install.sh /path/to/your/repo
+
+# Copy mode — independent copies; upgrade by re-running.
+./install.sh --copy /path/to/your/repo
+```
+
+This installs into `your-repo/scripts/`:
+
+```
+scripts/
+  jj                          ← workspace-pinned jj wrapper
+  workflow                    ← claim/integrate lifecycle manager
+  conflicts                   ← conflict inspector + resolver
+  todo                        ← ticket dependency graph
+  hooks/
+    jj_guard.fish             ← Claude Code PreToolUse guard
+  lib/
+    setup.fish                ← shared sourcing helpers
+    todo_graph.pl             ← dependency graph engine
+```
+
+**Manual follow-ups after install:**
+
+1. Register `scripts/hooks/jj_guard.fish` as a Claude Code PreToolUse(Bash) hook in
+   `.claude/settings.json` (see [The jj_guard hook](#the-jj_guard-hook)).
+2. Copy `jjworkflow.example.toml` → `jjworkflow.toml` and edit if defaults don't fit.
+3. Add a `scripts/provision-workspace` executable if new workspaces need shared or
+   generated directories (see [Appendix](#appendix-example-provision-workspace-hook)).
+
+---
+
+## Repository shape
+
+The toolkit expects one `default` workspace (the coordinator) plus any number of feature
+workspaces, each a sibling directory at the same level:
+
+```
+../
+  default/          ← coordinator; run scripts/workflow from here
+  feature-a/        ← feature workspace (created by claim/start)
+  feature-b/
+  .integrated/      ← archived workspaces after integrate
+  .abandoned/       ← archived workspaces after abandon
+```
+
+---
+
+## The `scripts/jj` wrapper
+
+**Always run jj through `scripts/jj` — never bare `jj`, `command jj`, or `git`.**
+
+The wrapper does three things:
+
+1. **Workspace pinning.** Passes `-R $project_dir` to every jj invocation, so scripts
+   running from any working directory always address the correct workspace.
+
+2. **Trunk immutability (outside `default`).** In any workspace other than `default`,
+   it sets `immutable_heads() = default@-` — the last committed point on the default
+   line. jj then refuses, per-operation, any rebase/abandon/squash that would reach
+   shared history or another feature's commits. Your own feature work (commits above
+   your claim bookmark) stays freely rewritable. The `default` workspace is left
+   unguarded so a human coordinator can always go in and fix things.
+
+3. **Flag rejection.** The flags `--config`, `--config-file`, and `--ignore-immutable`
+   are refused; they would bypass the guard.
+
+---
+
+## The `jj_guard` hook
+
+`scripts/hooks/jj_guard.fish` is a Claude Code `PreToolUse(Bash)` hook that enforces
+the routing rules for AI agents:
+
+- **jj must be invoked via a relative `scripts/jj`** — `scripts/jj`, `./scripts/jj`,
+  or `../<ws>/scripts/jj` (a sibling workspace). An absolute path or bare `jj` is
+  refused: an absolute path silently targets the workspace the script lives in, not
+  your current working directory.
+- **`git` is banned outright.** This is a jj repository; git mutations corrupt or
+  confuse the op log and working-copy state.
+
+Register it in `.claude/settings.json`:
+
+```json
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          { "type": "command", "command": "fish scripts/hooks/jj_guard.fish" }
+        ]
+      }
+    ]
+  }
+}
+```
+
+Exit 2 from the hook blocks the tool call with the error on stderr; exit 0 allows it.
+
+---
+
+## Feature workflow
+
+`scripts/workflow` manages the full feature lifecycle. Run it from the `default`
+workspace — except `repair`, `converge`, and `resolve`, which run from the affected
+feature workspace.
+
+### Claiming and starting features
+
+```bash
+# Claim a ticket and spin up a new workspace:
+scripts/workflow claim TICKET_NAME
+
+# Start an ad-hoc workspace with no ticket:
+scripts/workflow start NAME
+
+# Fold extra tickets into an already-running workspace's claim:
+scripts/workflow claim TICKET_A TICKET_B --into NAME
+```
+
+`claim TICKET_NAME`:
+- Moves the ticket file from its triage folder (`critical/`, `planned/`, or `maybe/`)
+  into `docs/tickets/wip/`, inside a new claim commit bookmarked `NAME` on
+  `default@`'s linear history.
+- Creates the `../NAME` workspace.
+- Runs the provision hook (if configured) to populate shared/generated directories.
+
+`start NAME` does the same without a ticket — useful for exploratory or ad-hoc work.
+
+`claim TICKET_A ... --into NAME` folds extra tickets into an existing workspace's
+claim commit. The workspace goes stale (its parent was rewritten); run
+`scripts/jj workspace update-stale` there before the next commit.
+
+**Claim eagerly** — before any exploration, brainstorming, or spec work. This
+establishes your baseline and provisions the workspace so builds and tests work
+immediately.
+
+### Integrating a feature
+
+```bash
+# Run from default:
+scripts/workflow integrate NAME
+```
+
+`integrate` performs these steps in order:
+
+1. **Refresh** — reorders NAME's claim commit to sit just under `default@`, carrying
+   the feature stack and workspace working copy with it.
+2. **Fold** — moves `default@` onto the feature tip.
+3. **Complete** — moves the owned ticket(s) from `wip/` → `done/` in a final commit.
+4. **Archive** — forgets the workspace and moves its directory to `../.integrated/`.
+
+If a conflict arises during the refresh step, integrate stops (exit 2) and leaves the
+conflict in place in `../NAME`. Resolve it there and re-run `integrate NAME`.
+
+### Abandoning a feature
+
+```bash
+# Run from default:
+scripts/workflow abandon NAME
+```
+
+Discards the feature, reverts every owned ticket back to its triage folder, and
+archives the workspace to `../.abandoned/`. Op-restore safe: the claim commit's
+abandonment rolls back the ticket moves automatically.
+
+### Refreshing (keeping current with trunk)
+
+```bash
+# Refresh one workspace (run from default):
+scripts/workflow refresh NAME
+
+# Refresh all non-default workspaces — HUMAN OPERATOR ONLY:
+scripts/workflow refresh --all
+```
+
+`refresh NAME` reorders NAME's claim commit to sit just under the current `default@`,
+carrying the feature stack. A conflict is left in place for you to resolve — it does
+not roll back.
+
+> **`refresh --all` is human-only.** It rewrites every workspace's claim at once.
+> Never run it as an AI agent: a concurrent `integrate` could fold a stale half into
+> `default@`. AI agents touch only their own feature, via `refresh NAME` or
+> `integrate NAME`.
+
+---
+
+## Ticket folders as status
+
+Work items are markdown files under `docs/tickets/`, with the folder name as the status:
+
+| Folder | Status |
+|--------|--------|
+| `critical/`, `planned/`, `maybe/` | Triage — claimable |
+| `wip/` | Claimed — in-flight |
+| `done/` | Integrated |
+
+Each ticket file can carry `needs:` frontmatter listing dependency slugs. The
+`scripts/todo` tool reads that graph without opening individual files:
+
+```bash
+scripts/todo ready           # items whose every dependency is in done/ (claimable now)
+scripts/todo blocked         # items with at least one unmet dependency
+scripts/todo graph SLUG      # upstream deps + downstream blockers for SLUG
+scripts/todo check           # detect cycles and dangling dependency references
+scripts/todo needs SLUG      # print SLUG's direct needs, one per line
+```
+
+Ticket moves happen inside jj commits, so `abandon` reverts them automatically:
+
+- `claim`: ticket move is baked into the claim commit → `abandon` reverts it.
+- `integrate`: ticket move to `done/` is baked into the completion commit.
+
+---
+
+## Recovery
+
+Conflicts and working-copy divergences land in the feature workspace, never on trunk.
+Three recovery commands run **from the affected feature workspace**:
+
+### `repair` — one-stop recovery
+
+```bash
+cd ../NAME
+scripts/workflow repair
+```
+
+The single entry point for "my branch shifted under me." In order:
+
+1. Clears a stale working copy (`workspace update-stale`).
+2. Heals a working-copy divergence if one is detected (`converge`).
+3. Walks any refresh/integrate conflicts oldest-first (`resolve`).
+
+**Exit codes:**
+
+| Exit | Meaning |
+|------|---------|
+| `0` | Branch clean — re-integrate. |
+| `1` | Stopped on a conflicted commit. Remove all markers from the files `jj st` lists, then re-run `repair`. |
+| `2` | Needs a human — divergent halves hold genuinely different work, or a jj step rolled back. |
+
+When `repair` stops on a conflict it calls `scripts/conflicts show` automatically and
+prints the per-file resolution commands.
+
+### `converge` — working-copy divergence
+
+```bash
+scripts/workflow converge
+```
+
+Heals a working-copy divergence: two or more commits sharing `@`'s change ID, left
+when a concurrent op rewrote the workspace while it had un-snapshotted edits. Keeps
+the half holding your work (identified by content — never by the `/N` index or a
+commit hash), drops the rest in one atomic pass.
+
+Refuses when two halves hold genuinely different work — that needs a human
+(`jj edit` the right half, `jj abandon` the other).
+
+### `resolve` — conflict walker
+
+```bash
+scripts/workflow resolve
+```
+
+Walks a feature stack's conflicts oldest-first after `refresh`/`integrate` left them.
+Each invocation either:
+
+- Drops you onto the oldest conflicted commit and exits 1 — remove every marker
+  from the files `jj st` lists, then re-run.
+- Folds your fix into that commit and advances to the next conflict.
+- Exits 0 when the stack is clean — re-run `integrate NAME`.
+
+A temporary `NAME-tip` bookmark tracks the real tip while you descend. It is
+forgotten on exit 0.
+
+---
+
+## Conflicts tool
+
+`scripts/conflicts` is a fast inspector and resolver for jj's native conflict marker
+format (diff+snapshot style).
+
+```bash
+scripts/conflicts list                         # list all conflicted files
+scripts/conflicts show [FILE ...]              # print conflict hunks with line numbers
+scripts/conflicts show --json [FILE ...]       # structured JSON output per hunk
+scripts/conflicts accept FILE snapshot         # accept +++ (literal snapshot) side
+scripts/conflicts accept FILE diff             # accept %%% (diff-applied) side
+scripts/conflicts accept FILE base             # accept the merge base
+scripts/conflicts accept FILE stack            # stack both adds: diff first, then snapshot
+scripts/conflicts accept FILE stack-snap-first # stack both adds: snapshot first
+```
+
+`show --json` includes a `stackable: true` field on hunks where both sides are pure
+additions (no deletions) — useful for scripted resolution.
+
+> **Phase B:** An `auto` subcommand is planned. It will detect pure-additive conflicts
+> in alphabetically-sorted list files and resolve them automatically, without manual
+> marker removal.
+
+---
+
+## Configuration
+
+Copy `jjworkflow.example.toml` → `jjworkflow.toml` in your repo root. All keys are
+optional; a missing file uses the defaults shown:
+
+```toml
+# Executable run after a new workspace is created, with the workspace dir as $1.
+# Default: scripts/provision-workspace
+provision_hook = "scripts/provision-workspace"
+```
+
+---
+
+## Appendix: Example provision-workspace hook
+
+When a project has shared gitignored directories each workspace needs — generated build
+inputs, large data files, compiled artifacts — create `scripts/provision-workspace`.
+The workflow toolkit runs it automatically during `claim`/`start`, passing the new
+workspace directory as `$1`. Without a hook, provisioning is a no-op (fine for
+source-only projects).
+
+Here is a generic example that symlinks a shared `data/` directory from the `default`
+checkout:
+
+```sh
+#!/usr/bin/env bash
+# scripts/provision-workspace
+# Called by scripts/workflow claim/start after jj workspace add.
+# $1 = the new workspace directory.
+set -euo pipefail
+ws_dir="$1"
+default_dir="$(dirname "$ws_dir")/default"
+
+# Symlink shared read-only data back to the default checkout.
+# The symlink is excluded by .git/info/exclude in default (shared by all
+# secondary workspaces), so no per-workspace exclude is needed.
+ln -sfn "$default_dir/data" "$ws_dir/data"
+
+echo "Provisioned: symlinked data/ in $ws_dir"
+```
+
+Make it executable:
+
+```bash
+chmod +x scripts/provision-workspace
+```
+
+The `.gitignore` entry for `data/` should use a **trailing slash** (`data/`) so it
+matches the directory but not the symlink — the symlink form stays excluded via
+`.git/info/exclude` in `default` (which is shared across all secondary workspaces
+because they have no `.git` of their own).
+
+Verify a newly provisioned workspace is clean:
+
+```bash
+scripts/jj st   # must report no changes
+```

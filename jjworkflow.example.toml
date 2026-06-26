@@ -1,0 +1,6 @@
+# Copy to jjworkflow.toml in your repo root and edit. All keys are optional.
+
+# Executable run after a new workspace is created, with the workspace dir as $1.
+# Use it to symlink shared/gitignored dirs and generate build inputs the new
+# workspace needs. Default: scripts/provision-workspace
+provision_hook = "scripts/provision-workspace"

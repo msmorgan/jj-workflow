@@ -123,7 +123,7 @@ end
 function __jjworkflow_config --argument-names key default
     set -l cfg $project_dir/jjworkflow.toml
     if test -f $cfg
-        set -l val (string match -rg "^\s*$key\s*=\s*[\"']?([^\"'#]*?)[\"']?\s*\$" <$cfg)
+        set -l val (string match -rg "^\s*$key\s*=\s*[\"']?([^\"'#]*?)[\"']?\s*(?:#.*)?\$" <$cfg)
         if test -n "$val"
             echo $val
             return

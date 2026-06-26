@@ -350,6 +350,10 @@ optional; a missing file uses the defaults shown:
 provision_hook = "scripts/provision-workspace"
 ```
 
+> **v1 fixed conventions:** `trunk_workspace` (the trunk workspace name, `default`) and
+> `tickets_root` (`docs/tickets`) are fixed in v1 and are not configurable via
+> `jjworkflow.toml`. `provision_hook` is the only configurable key.
+
 ---
 
 ## Appendix: Example provision-workspace hook

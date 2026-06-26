@@ -26,6 +26,8 @@ while IFS= read -r -d '' f; do
     fi
 done < <(find "$src" -type f -print0)
 
+cp "$(dirname "$0")/jjworkflow.example.toml" "$target/jjworkflow.example.toml"
+
 echo "Installed toolkit ($mode) into $target/scripts/"
 echo
 echo "Manual follow-ups:"

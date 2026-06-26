@@ -170,6 +170,11 @@ def _sorted_merge_resolution(hunk, lines):
         return None, "no-newline at EOF"
 
     base = hunk["diff_base"]
+    # The snapshot (+++) side is taken literally, so its deletions aren't in
+    # has_removal (which only sees the %%% diff side). If any base line is missing
+    # from the snapshot, that side removed it — decline (not a pure-add conflict).
+    if _multiset_diff(base, hunk["snapshot"]):
+        return None, "removal present (snapshot side)"
     if not _is_sorted(base):
         return None, "base region not sorted"
 

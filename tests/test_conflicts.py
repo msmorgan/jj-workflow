@@ -247,6 +247,27 @@ def test_auto_leaves_non_qualifying(tmp_path):
     assert "resolved 0" in r.stdout
 
 
+SNAPSHOT_REMOVAL = """import aaa
+<<<<<<< conflict 1 of 1
+%%%%%%%
+ import bbb
++import ccc
+ import ddd
++++++++
+import ddd
+>>>>>>> conflict 1 of 1
+import zzz
+"""
+
+def test_declines_on_snapshot_side_removal(tmp_path):
+    # The %%% side keeps `import bbb` as context and adds ccc; the +++ snapshot
+    # side DELETED `import bbb`. Must decline (else bbb is silently resurrected).
+    hunk, lines = _hunk(tmp_path, SNAPSHOT_REMOVAL)
+    new_lines, reason = conflicts._sorted_merge_resolution(hunk, lines)
+    assert new_lines is None
+    assert reason == "removal present (snapshot side)"
+
+
 def test_accept_sort_one_file(tmp_path):
     f = tmp_path / "imports.txt"
     f.write_text(QUALIFYING)

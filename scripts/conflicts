@@ -315,6 +315,66 @@ def cmd_accept(args):
     print(f"Resolved {len(hunks)} hunk(s) in {filepath} (accepted {side} side).")
 
 
+def _report(filepath, hunk, status, msg):
+    label = "sorted-merge ✓" if status == "ok" else "left"
+    print(f"  {filepath} hunk {hunk['hunk']}/{hunk['total']}: {label} ({msg})")
+
+
+def _auto_resolve_file(path, filepath, dry):
+    """Resolve every qualifying hunk in one file. Returns (resolved, left)."""
+    resolved = left = 0
+    declined = set()  # raw-text signatures of hunks we've already left
+    while True:
+        hunks, lines = parse_file(path)
+        pending = [h for h in hunks if "".join(h["raw"]) not in declined]
+        if not pending:
+            break
+        progressed = False
+        for h in pending:
+            new_lines, info = _sorted_merge_resolution(h, lines)
+            if new_lines is None:
+                _report(filepath, h, "left", info)
+                declined.add("".join(h["raw"]))
+                left += 1
+                continue
+            _report(filepath, h, "ok", f"{info} adds")
+            resolved += 1
+            if dry:
+                # Don't rewrite; mark resolved so we don't loop on it forever.
+                declined.add("".join(h["raw"]))
+            else:
+                path.write_text("".join(new_lines))
+                progressed = True
+                break  # re-parse the rewritten file
+        if dry and not progressed:
+            break
+        if not dry and not progressed:
+            break
+    return resolved, left
+
+
+def cmd_auto(args):
+    dry = "--dry-run" in args
+    files = [a for a in args if not a.startswith("--")]
+    if not files:
+        files = _conflicted_files()
+    if not files:
+        print("No conflicts found.")
+        return
+    total_resolved = total_left = 0
+    for filepath in files:
+        path = _resolve_path(filepath)
+        if path is None:
+            print(f"Not found: {filepath}", file=sys.stderr)
+            continue
+        r, l = _auto_resolve_file(path, filepath, dry)
+        total_resolved += r
+        total_left += l
+    print("  ---")
+    suffix = " (dry-run, nothing written)" if dry else ""
+    print(f"  resolved {total_resolved} hunk(s), {total_left} left for review{suffix}")
+
+
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
@@ -330,6 +390,9 @@ _USAGE = """Usage: scripts/conflicts <command> [args]
   accept FILE base              Accept merge base for all hunks in FILE
   accept FILE stack             Stack both adds: diff-side first, then snapshot
   accept FILE stack-snap-first  Stack both adds: snapshot first, then diff-side
+  auto [--dry-run] [FILE ...]   Auto-merge alphabetized-list conflicts (both sides
+                                pure adds into a sorted run of >=3 lines). Reports
+                                and leaves anything that doesn't qualify.
 """
 
 
@@ -339,7 +402,7 @@ def main():
         print(_USAGE)
         sys.exit(1)
     cmd, rest = argv[0], argv[1:]
-    dispatch = {"list": cmd_list, "show": cmd_show, "accept": cmd_accept}
+    dispatch = {"list": cmd_list, "show": cmd_show, "accept": cmd_accept, "auto": cmd_auto}
     if cmd not in dispatch:
         print(f"Unknown command: {cmd!r}\n", file=sys.stderr)
         print(_USAGE, file=sys.stderr)

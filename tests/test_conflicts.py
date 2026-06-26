@@ -209,3 +209,39 @@ def test_sorted_merge_prepends_before_run_start(tmp_path):
     assert new_lines is not None
     assert "".join(new_lines) == PREPEND_EXPECTED
     assert n_adds == 2
+
+
+def _run(*args):
+    return subprocess.run(
+        [sys.executable, str(CONFLICTS), *args],
+        capture_output=True, text=True,
+    )
+
+
+def test_auto_resolves_qualifying_file(tmp_path):
+    f = tmp_path / "imports.txt"
+    f.write_text(QUALIFYING)
+    r = _run("auto", str(f))
+    assert r.returncode == 0, r.stderr
+    assert f.read_text() == EXPECTED
+    assert "sorted-merge" in r.stdout
+    assert "resolved 1" in r.stdout
+
+
+def test_auto_dry_run_changes_nothing(tmp_path):
+    f = tmp_path / "imports.txt"
+    f.write_text(QUALIFYING)
+    r = _run("auto", "--dry-run", str(f))
+    assert r.returncode == 0, r.stderr
+    assert f.read_text() == QUALIFYING  # unchanged
+    assert "sorted-merge" in r.stdout
+
+
+def test_auto_leaves_non_qualifying(tmp_path):
+    f = tmp_path / "imports.txt"
+    f.write_text(REMOVAL)
+    r = _run("auto", str(f))
+    assert r.returncode == 0, r.stderr
+    assert f.read_text() == REMOVAL  # left untouched
+    assert "left (removal present)" in r.stdout
+    assert "resolved 0" in r.stdout

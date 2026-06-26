@@ -30,10 +30,10 @@ its own isolated workspace.
 
 ```bash
 # Symlink mode — updates to jj-workflow propagate to your repo automatically.
-./install.sh /path/to/your/repo
+./install.fish /path/to/your/repo
 
 # Copy mode — independent copies; upgrade by re-running.
-./install.sh --copy /path/to/your/repo
+./install.fish --copy /path/to/your/repo
 ```
 
 This installs into `your-repo/scripts/`:
